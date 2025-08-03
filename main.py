@@ -48,11 +48,24 @@ def backtest(data, model, predictors, start = 2500, step = 250):
         all_preds.append(predicted)
     return pd.concat(all_preds)
 
+def compute_rsi(close_series, window=14, use_ewm=True):
+    delta = close_series.diff()
+    gain  = delta.clip(lower=0)
+    loss  = -delta.clip(upper=0)
+    if use_ewm:
+        avg_gain = gain.ewm(alpha=1/window, adjust=False).mean()
+        avg_loss = loss.ewm(alpha=1/window, adjust=False).mean()
+    else:
+        avg_gain = gain.rolling(window).mean()
+        avg_loss = loss.rolling(window).mean()
+    rs  = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
+
 # predictions = backtest(sp500, model, predictors)
 # print(precision_score(predictions["Target"], predictions["Predicted"]))
 
 horizons = [2,5,60,250,1000]
-new_predictors = []
+new_predictors = ["RSI_14"]
 for horizon in horizons:
     rolling_averages = sp500.rolling(horizon).mean()
     ratio_column = f"Close_Ratio_{horizon}"
@@ -63,6 +76,7 @@ for horizon in horizons:
     
     new_predictors += [ratio_column, trend_column]
 
+sp500["RSI_14"] = compute_rsi(sp500["Close"], window=14)
 sp500 = sp500.dropna()
 
 model = RandomForestClassifier(n_estimators=200, min_samples_split=50, random_state=1)
