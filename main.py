@@ -1,7 +1,7 @@
 import yfinance as yf
 import matplotlib.pyplot as plt 
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import precision_score
+from sklearn.metrics import precision_score, confusion_matrix, classification_report
 import pandas as pd
 sp500 = yf.Ticker("^GSPC")
 sp500 = sp500.history(period = "max")
@@ -61,24 +61,56 @@ def compute_rsi(close_series, window=14, use_ewm=True):
     rs  = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
-# predictions = backtest(sp500, model, predictors)
-# print(precision_score(predictions["Target"], predictions["Predicted"]))
+def compute_momentum(close_series, window=10):
+    return close_series - close_series.shift(window)
 
-horizons = [2,5,60,250,1000]
-new_predictors = ["RSI_14"]
-for horizon in horizons:
-    rolling_averages = sp500.rolling(horizon).mean()
-    ratio_column = f"Close_Ratio_{horizon}"
-    sp500[ratio_column] = sp500["Close"] / rolling_averages["Close"]
+def compute_sma(series, window):
+    return series.rolling(window=window).mean()
+
+def compute_ema(series, window):
+    return series.ewm(span=window, adjust=False).mean()
+
+
+def add_features(sp500):
+    sp500 = sp500.copy()
+    sp500["Momentum"] = compute_momentum(sp500["Close"], window=10)
+    sp500["RSI_14"] = compute_rsi(sp500["Close"], window=14)
+
+    horizons = [2, 5, 60, 250]
+    new_predictors = ["RSI_14", "Momentum"]
+    for horizon in horizons:
+        rolling_averages = sp500.rolling(horizon).mean()
+        ratio_column = f"Close_Ratio_{horizon}"
+        sp500[ratio_column] = sp500["Close"] / rolling_averages["Close"]
+        
+        trend_column = f"Trend_{horizon}"
+        sp500[trend_column] = sp500.shift(1).rolling(horizon).sum()["Target"]
+        
+        new_predictors += [ratio_column, trend_column]
     
-    trend_column = f"Trend_{horizon}"
-    sp500[trend_column] = sp500.shift(1).rolling(horizon).sum()["Target"]
+    sp500 = sp500.dropna()
+    print(sp500[["Close", "Momentum"]].head(15))
+    return sp500, new_predictors
+
+
+def trainTest(sp500):
+    sp500, new_predictors = add_features(sp500)
     
-    new_predictors += [ratio_column, trend_column]
+    trainDate = "2020-01-01" # little more than 80% of the data
+    train = sp500.loc[:trainDate].copy()
+    test = sp500.loc[trainDate:].copy()
+    
+    X_train, X_test, y_train, y_test = train[new_predictors], test[new_predictors], train["Target"], test["Target"]
+    model = RandomForestClassifier(n_estimators=200, min_samples_split=50, random_state=1)
+    model.fit(X_train, y_train)
+    
+    preds = model.predict(X_test)
+    precision = precision_score(y_test, preds)
+    print("Precision Score:", precision)
+    print(confusion_matrix(y_test, preds))
+    print(classification_report(y_test, preds))
+    return model, sp500, new_predictors
 
-sp500["RSI_14"] = compute_rsi(sp500["Close"], window=14)
-sp500 = sp500.dropna()
-
-model = RandomForestClassifier(n_estimators=200, min_samples_split=50, random_state=1)
-predictions = backtest(sp500, model, new_predictors)
-print(precision_score(predictions["Target"], predictions["Predicted"]))
+model, sp500, predictors = trainTest(sp500)
+predictions = backtest(sp500, model, predictors)
+print("Backtest Precision Score:", precision_score(predictions["Target"], predictions["Predicted"]))
