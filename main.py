@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import precision_score, confusion_matrix, classification_report
 import pandas as pd
+import numpy as np
 sp500 = yf.Ticker("^GSPC")
 sp500 = sp500.history(period = "max")
 #print(sp500.head())
@@ -70,14 +71,72 @@ def compute_sma(series, window):
 def compute_ema(series, window):
     return series.ewm(span=window, adjust=False).mean()
 
+def compute_obv(close, volume):
+    return (np.sign(close.diff()) * volume).fillna(0).cumsum()
 
+def compute_bollinger_bands(close, window=20, num_std=2):
+    sma = close.rolling(window).mean()
+    std = close.rolling(window).std()
+    upper_band = sma + num_std * std
+    lower_band = sma - num_std * std
+    return upper_band, lower_band
+
+def compute_macd(close, short=12, long=26, signal=9):
+    ema_short = compute_ema(close, short)
+    ema_long = compute_ema(close, long)
+    macd_line = ema_short - ema_long
+    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+    macd_histogram = macd_line - signal_line
+    return macd_line, signal_line, macd_histogram
+
+def add_time_features(df):
+    df = df.copy()
+    df["DayOfWeek"] = df.index.dayofweek
+    df["Month"] = df.index.month
+    df["DayOfMonth"] = df.index.day
+    df["Year"] = df.index.year
+
+    # Count consecutive up and down days
+    df["Return"] = df["Close"].pct_change()
+    df["Up"] = df["Return"] > 0
+
+    df["UpStreak"] = 0
+    df["DownStreak"] = 0
+    up_streak = down_streak = 0
+
+    for i in range(1, len(df)):
+        if df["Up"].iloc[i]:
+            up_streak += 1
+            down_streak = 0
+        elif not df["Up"].iloc[i] and not pd.isna(df["Return"].iloc[i]):
+            down_streak += 1
+            up_streak = 0
+        else:
+            up_streak = down_streak = 0
+                                       
+        df.at[df.index[i], "UpStreak"] = up_streak
+        df.at[df.index[i], "DownStreak"] = down_streak
+
+    df.drop(["Return", "Up"], axis=1, inplace=True)
+    return df
 def add_features(sp500):
     sp500 = sp500.copy()
+    sp500 = add_time_features(sp500)
+    
     sp500["Momentum"] = compute_momentum(sp500["Close"], window=10)
     sp500["RSI_14"] = compute_rsi(sp500["Close"], window=14)
+    sp500["SMA_50"] = compute_sma(sp500["Close"], window=50)
+    sp500["SMA_200"] = compute_sma(sp500["Close"], window=200)
+    sp500["EMA_12"] = compute_ema(sp500["Close"], window=12)
+    sp500["EMA_26"] = compute_ema(sp500["Close"], window=26)
+    sp500["EMA_Diff"] = sp500["EMA_12"] - sp500["EMA_26"]
+    sp500["OBV"] = compute_obv(sp500["Close"], sp500["Volume"])
+    sp500["Upper_Band"], sp500["Lower_Band"] = compute_bollinger_bands(sp500["Close"], window=20, num_std=2)
+    sp500["MACD_Line"], sp500["Signal_Line"], sp500["MACD_Histogram"] = compute_macd(sp500["Close"], short=12, long=26, signal=9)
 
     horizons = [2, 5, 60, 250]
-    new_predictors = ["RSI_14", "Momentum"]
+    new_predictors = ["RSI_14", "Momentum", "SMA_50", "SMA_200", "EMA_Diff", "OBV", "Upper_Band", "Lower_Band", "MACD_Line", "Signal_Line", "MACD_Histogram",
+                      "DayOfWeek", "Month", "DayOfMonth", "Year", "UpStreak", "DownStreak"]
     for horizon in horizons:
         rolling_averages = sp500.rolling(horizon).mean()
         ratio_column = f"Close_Ratio_{horizon}"
@@ -89,7 +148,6 @@ def add_features(sp500):
         new_predictors += [ratio_column, trend_column]
     
     sp500 = sp500.dropna()
-    print(sp500[["Close", "Momentum"]].head(15))
     return sp500, new_predictors
 
 
