@@ -1,6 +1,7 @@
 import yfinance as yf
 import matplotlib.pyplot as plt 
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.inspection import permutation_importance
 from sklearn.metrics import precision_score, confusion_matrix, classification_report
 import pandas as pd
 import numpy as np
@@ -167,6 +168,23 @@ def trainTest(sp500):
     print("Precision Score:", precision)
     print(confusion_matrix(y_test, preds))
     print(classification_report(y_test, preds))
+    
+    perm_importance = permutation_importance(model, X_test, y_test, n_repeats=10, random_state=42, scoring='precision')
+    importances = perm_importance.importances_mean
+    stds = perm_importance.importances_std
+    features = new_predictors
+    indices = importances.argsort()[::-1]
+
+    print("\nPermutation Feature Importance:")
+    for i in range(len(features)):
+        print(f"{i+1}. {features[indices[i]]}: {importances[indices[i]]:.4f} +/- {stds[indices[i]]:.4f}")
+
+    plt.figure(figsize=(12,6))
+    plt.title("Permutation Feature Importance (Precision)")
+    plt.bar(range(len(features)), importances[indices], yerr=stds[indices], align="center")
+    plt.xticks(range(len(features)), [features[i] for i in indices], rotation=90)
+    plt.tight_layout()
+    plt.show()
     return model, sp500, new_predictors
 
 model, sp500, predictors = trainTest(sp500)
