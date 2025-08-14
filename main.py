@@ -5,6 +5,8 @@ from sklearn.inspection import permutation_importance
 from sklearn.metrics import precision_score, confusion_matrix, classification_report
 import pandas as pd
 import numpy as np
+from xgboost import XGBClassifier
+
 sp500 = yf.Ticker("^GSPC")
 sp500 = sp500.history(period = "max")
 #print(sp500.head())
@@ -32,21 +34,20 @@ sp500 = sp500.loc["1990-01-01":].copy()
 # combined.plot()
 # plt.show()
 
-def predict(train, test, predictors, model):
+def predict(train, test, predictors, model, threshold=0.60):
     model.fit(train[predictors], train["Target"])
-    pred = model.predict_proba(test[predictors])[:, 1]
-    pred[pred >= 0.6] = 1 #.6 is the threshold for a positive prediction
-    pred[pred < 0.6] = 0
-    pred = pd.Series(pred, index=test.index, name = "Predicted")
+    proba = model.predict_proba(test[predictors])[:, 1]
+    pred = (proba >= threshold).astype(int)
+    pred = pd.Series(pred, index=test.index, name="Predicted")
     combined = pd.concat([test["Target"], pred], axis=1)
     return combined
-    
-def backtest(data, model, predictors, start = 2500, step = 250):
+
+def backtest(data, model, predictors, start=2500, step=250, threshold=0.60):
     all_preds = []
     for i in range(start, data.shape[0], step):
         train = data.iloc[0:i].copy()
         test = data.iloc[i:(i+step)].copy()
-        predicted = predict(train, test, predictors, model)
+        predicted = predict(train, test, predictors, model, threshold=threshold)
         all_preds.append(predicted)
     return pd.concat(all_preds)
 
@@ -160,7 +161,15 @@ def trainTest(sp500):
     test = sp500.loc[trainDate:].copy()
     
     X_train, X_test, y_train, y_test = train[new_predictors], test[new_predictors], train["Target"], test["Target"]
-    model = RandomForestClassifier(n_estimators=200, min_samples_split=50, random_state=1)
+    model = XGBClassifier(
+    n_estimators=200,
+    max_depth=4,
+    learning_rate=0.05,
+    use_label_encoder=False,  # to suppress warning in newer versions
+    eval_metric='logloss',
+    random_state=1
+    )
+
     model.fit(X_train, y_train)
     
     preds = model.predict(X_test)
@@ -180,13 +189,89 @@ def trainTest(sp500):
         print(f"{i+1}. {features[indices[i]]}: {importances[indices[i]]:.4f} +/- {stds[indices[i]]:.4f}")
 
     plt.figure(figsize=(12,6))
-    plt.title("Permutation Feature Importance (Precision)")
+    plt.title("Permutation Feature Importance (Precision)") 
     plt.bar(range(len(features)), importances[indices], yerr=stds[indices], align="center")
     plt.xticks(range(len(features)), [features[i] for i in indices], rotation=90)
     plt.tight_layout()
     plt.show()
     return model, sp500, new_predictors
 
+def train_valid_test_xgb(sp500):
+
+    sp500, predictors = add_features(sp500)
+
+    #    - Train: up to 2017-12-31
+    #    - Valid: 2018-01-01 to 2019-12-31
+    #    - Test : 2020-01-01 onwards 
+    train_end = "2017-12-31"
+    valid_end = "2019-12-31"
+    test_start = "2020-01-01"
+
+    train = sp500.loc[:train_end].copy()
+    valid = sp500.loc[train_end:valid_end].copy()
+    test  = sp500.loc[test_start:].copy()
+
+    X_train, y_train = train[predictors], train["Target"]
+    X_valid, y_valid = valid[predictors], valid["Target"]
+    X_test,  y_test  = test[predictors],  test["Target"]
+
+
+    pos = y_train.sum() # class balance
+    neg = len(y_train) - pos
+    scale_pos_weight = neg / pos if pos > 0 else 1.0
+
+
+    xgb = XGBClassifier(
+        n_estimators=2000,         
+        learning_rate=0.03,
+        max_depth=4,
+        subsample=0.9
+        colsample_bytree=0.9,
+        min_child_weight=1,
+        reg_alpha=0.0,
+        reg_lambda=1.0,
+        scale_pos_weight=scale_pos_weight,
+        eval_metric='logloss',
+        tree_method='hist',
+        random_state=1
+    )
+
+    xgb.fit(
+        X_train, y_train,
+        eval_set=[(X_valid, y_valid)],
+        early_stopping_rounds=50,
+        verbose=False
+    )
+
+    print(f"Best iteration chosen by early stopping: {xgb.best_iteration}")
+
+    # 5) Tune the classification threshold on the VALIDATION set
+    valid_proba = xgb.predict_proba(X_valid)[:, 1]
+
+    thresholds = np.linspace(0.4, 0.7, 31)  # 0.40 to 0.70 step 0.01
+    best_thr, best_prec = 0.5, -1
+    for thr in thresholds:
+        pred_v = (valid_proba >= thr).astype(int)
+        p = precision_score(y_valid, pred_v, zero_division=0)
+        if p > best_prec:
+            best_prec, best_thr = p, thr
+
+    print(f"Chosen threshold from validation: {best_thr:.2f} (precision={best_prec:.3f})")
+
+    # 6) Evaluate on TEST using the tuned threshold
+    test_proba = xgb.predict_proba(X_test)[:, 1]
+    test_pred = (test_proba >= best_thr).astype(int)
+
+    print("\n=== XGB Test Set Results (with tuned threshold) ===")
+    print("Precision:", precision_score(y_test, test_pred))
+    print(confusion_matrix(y_test, test_pred))
+    print(classification_report(y_test, test_pred))
+
+    return xgb, sp500, predictors, best_thr
 model, sp500, predictors = trainTest(sp500)
+xgb_model, sp500_tuned, predictors_tuned, tuned_thr = train_valid_test_xgb(sp500)
+bt_preds = backtest(sp500_tuned, xgb_model, predictors_tuned, threshold=tuned_thr)
+print("Backtest Precision (tuned threshold):", precision_score(bt_preds["Target"], bt_preds["Predicted"]))
+
 predictions = backtest(sp500, model, predictors)
 print("Backtest Precision Score:", precision_score(predictions["Target"], predictions["Predicted"]))
